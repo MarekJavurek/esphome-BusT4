@@ -2,6 +2,7 @@
 
 #include "esphome/components/bus_t4/bus_t4.h"
 #include "esphome/components/bus_t4/t4_packet.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
 namespace esphome::bus_t4_control_unit {
@@ -49,15 +50,33 @@ template<typename Derived> class ConfigParam : public BusT4Device {
  protected:
   Derived *derived_() { return static_cast<Derived *>(this); }
 
+  // The boot-time GET runs from setup() and blocks. A request can be lost on a
+  // busy bus, and a single miss would leave the entity FAILED until the next
+  // reboot, so ask again before giving up. A parameter the controller never
+  // answers costs at most GET_ATTEMPTS * GET_TIMEOUT_MS plus the gaps.
+  static constexpr uint8_t GET_ATTEMPTS = 3;
+  static constexpr uint32_t GET_TIMEOUT_MS = 500;
+  static constexpr uint32_t GET_RETRY_DELAY_MS = 50;
+
   void initial_get_() {
     uint8_t message[5] = {FOR_CU, this->param_, REQ_GET, 0x00, 0x00};
     T4Packet rsp;
-    if (!this->parent_->dmp_request(this->target_address_, message, sizeof(message), &rsp, 500))
-      this->derived_()->mark_failed(LOG_STR("no response from controller"));
-    else if (rsp.message.dmp.status == ERR_UNSUPPORTED)
-      this->derived_()->mark_failed(LOG_STR("parameter not supported by controller"));
-    else if (rsp.message.dmp.status == ERR_NONE && this->has_payload_(rsp))
-      this->derived_()->publish_value_(this->read_raw_(rsp));
+    for (uint8_t attempt = 1; attempt <= GET_ATTEMPTS; attempt++) {
+      if (!this->parent_->dmp_request(this->target_address_, message, sizeof(message), &rsp,
+                                      GET_TIMEOUT_MS)) {
+        if (attempt < GET_ATTEMPTS) {
+          delay(GET_RETRY_DELAY_MS);  // let the bus go quiet before asking again
+          continue;
+        }
+        this->derived_()->mark_failed(LOG_STR("no response from controller"));
+        return;
+      }
+      if (rsp.message.dmp.status == ERR_UNSUPPORTED)
+        this->derived_()->mark_failed(LOG_STR("parameter not supported by controller"));
+      else if (rsp.message.dmp.status == ERR_NONE && this->has_payload_(rsp))
+        this->derived_()->publish_value_(this->read_raw_(rsp));
+      return;
+    }
   }
 
   uint32_t read_raw_(const T4Packet &p) const { return t4_read_be(p, DATA_OFFSET, this->width_); }
