@@ -111,6 +111,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/makstech/esphome-BusT4
+      ref: v1
     components: [bus_t4]
 
 uart:
@@ -135,6 +136,20 @@ cover:
 esphome run gate.yaml
 ```
 
+## Versioning
+
+`ref: v1` tracks the newest release that stays compatible with the `v1` configuration. ESPHome re-checks the source once a day, so compatible fixes arrive on your next rebuild without editing anything. Breaking changes go out as `v2` and never reach you until you change that line.
+
+| `ref` | You get |
+|-------|---------|
+| `v1` | Newest `v1.x.y` release. Recommended. |
+| `v1.2.3` | That exact release, frozen. Add `refresh: never` alongside it. |
+| omitted | Whatever is on `main`, including unreleased work. |
+
+Do not set `refresh: never` with `ref: v1` — that pins you to whichever release `v1` happened to point at when you first built, which is the one thing the moving tag exists to avoid.
+
+See [Releases](https://github.com/makstech/esphome-BusT4/releases) for what changed.
+
 ## Configuration
 
 ### Full Example
@@ -144,6 +159,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/makstech/esphome-BusT4
+      ref: v1
     components: [bus_t4]
 
 uart:
@@ -196,6 +212,8 @@ button:
 | `open_duration` | time | `20s` | Initial/fallback time to fully open |
 | `close_duration` | time | `20s` | Initial/fallback time to fully close |
 | `position_report_interval` | time | `1s` | How often to update position during movement |
+| `force_estimated_position` | boolean | `false` | Ignore the controller's encoder and estimate position from timing |
+| `controller_address` | hex | *discovered* | Pin the control unit address and skip bus discovery |
 
 ### Available Commands
 
