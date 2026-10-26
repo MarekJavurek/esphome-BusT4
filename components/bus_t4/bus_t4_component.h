@@ -2,7 +2,6 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
-#include <freertos/event_groups.h>
 #include <functional>
 #include <string>
 #include <vector>
@@ -17,6 +16,14 @@ namespace esphome::bus_t4 {
 
 // Forward declaration
 class BusT4Device;
+
+// A queued transmission, already framed. Packets and raw sends share one path so that
+// nothing writes to the UART outside the bus task.
+struct T4Frame {
+  uint8_t size = 0;
+  bool raw = false;
+  uint8_t data[sizeof(T4Packet::data) + 3] = {};  // SYNC + size + payload + size
+};
 
 class BusT4Component final : public Component, public uart::UARTDevice {
  public:
@@ -33,11 +40,8 @@ class BusT4Component final : public Component, public uart::UARTDevice {
     return xQueueReceive(rxQueue_, packet, xTicksToWait);
   }
 
-  bool write(T4Packet *packet, TickType_t xTicksToWait) {
-    if (txQueue_ == nullptr)
-      return false;
-    return xQueueSend(txQueue_, packet, xTicksToWait);
-  }
+  // Frame `packet` and queue it; the bus task is what puts it on the wire.
+  bool write(T4Packet *packet, TickType_t xTicksToWait);
 
   // --- Send primitives (used by devices via parent_, and by the debug helpers) ---
   // Verb says whether a reply is expected: `send` fires and returns; `request` waits.
@@ -85,10 +89,13 @@ class BusT4Component final : public Component, public uart::UARTDevice {
 
  private:
   void discover_();
-  void rxTask();
-  void txTask();
-  static void rxTaskThunk(void *self) { static_cast<BusT4Component *>(self)->rxTask(); }
-  static void txTaskThunk(void *self) { static_cast<BusT4Component *>(self)->txTask(); }
+
+  // Receive and transmit share one task, so a send can never land in the middle of
+  // a frame another device is still transmitting.
+  void busTask();
+  static void busTaskThunk(void *self) { static_cast<BusT4Component *>(self)->busTask(); }
+
+  bool queue_frame(const T4Frame &frame, TickType_t xTicksToWait);
 
   // Dispatch a received packet to all registered devices (skips TX echo).
   void dispatch_packet_(const T4Packet &packet);
@@ -103,13 +110,10 @@ class BusT4Component final : public Component, public uart::UARTDevice {
 
   T4Source address_;
 
-  TaskHandle_t rxTask_ = nullptr;
-  TaskHandle_t txTask_ = nullptr;
+  TaskHandle_t busTask_ = nullptr;
 
   QueueHandle_t rxQueue_ = nullptr;
   QueueHandle_t txQueue_ = nullptr;
-
-  EventGroupHandle_t requestEvent_ = nullptr;
 
   std::vector<BusT4Device *> devices_;
 
@@ -124,13 +128,11 @@ class BusT4Component final : public Component, public uart::UARTDevice {
   sensor::Sensor *bus_errors_sensor_{nullptr};
   sensor::Sensor *bus_timeouts_sensor_{nullptr};
 
-  // Bus diagnostics (cumulative since boot); written by rxTask/dmp_request.
+  // Bus diagnostics (cumulative since boot); written by the bus task/dmp_request.
   uint32_t rx_errors_{0};    // bad frame: header/payload CRC, framing, or rxQueue full (logged per type)
   uint32_t req_timeout_{0};  // dmp_request gave up waiting for a reply
   uint32_t last_bus_errors_{0xFFFFFFFF};
   uint32_t last_bus_timeouts_{0xFFFFFFFF};
 };
-
-enum { EB_REQUEST_FREE = 1, EB_REQUEST_PENDING = 2, EB_REQUEST_COMPLETE = 4 };
 
 } // namespace esphome::bus_t4

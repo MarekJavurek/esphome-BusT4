@@ -9,6 +9,8 @@
 
 #include <esp_rom_sys.h>
 
+#include <algorithm>
+
 namespace esphome::bus_t4 {
 
 static const char *TAG = "bus_t4";
@@ -20,6 +22,16 @@ static constexpr uint32_t T4_BAUD_BREAK = 9200;
 // Max message bytes per frame: T4Packet::data[63] less the 7-byte header and 1-byte CRC2.
 static constexpr size_t T4_MAX_MESSAGE = 55;
 
+// A request and its reply are separated by up to ~55ms on a shared bus, so treat the
+// bus as free only after it has been quiet for longer than that.
+static constexpr uint32_t BUS_IDLE_MS = 100;
+
+// Bounded so a talkative bus cannot starve the transmit path
+static constexpr uint8_t RX_DRAIN_LIMIT = 64;
+
+// Minimum gap between two of our own transmissions
+static constexpr TickType_t TX_MIN_INTERVAL = pdMS_TO_TICKS(100);
+
 void BusT4Component::setup() {
   rxQueue_ = xQueueCreate(32, sizeof(T4Packet));
   if (rxQueue_ == nullptr) {
@@ -28,7 +40,7 @@ void BusT4Component::setup() {
     return;
   }
 
-  txQueue_ = xQueueCreate(32, sizeof(T4Packet));
+  txQueue_ = xQueueCreate(32, sizeof(T4Frame));
   if (txQueue_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create TX queue");
     vQueueDelete(rxQueue_);
@@ -37,17 +49,8 @@ void BusT4Component::setup() {
     return;
   }
 
-  requestEvent_ = xEventGroupCreate();
-  xEventGroupSetBits(requestEvent_, EB_REQUEST_FREE);
-
-  if (xTaskCreate(rxTaskThunk, "bus_t4_rx", 8192, this, 10, &rxTask_) != pdPASS) {
-    ESP_LOGE(TAG, "Failed to create RX task");
-    this->mark_failed();
-    return;
-  }
-
-  if (xTaskCreate(txTaskThunk, "bus_t4_tx", 8192, this, 10, &txTask_) != pdPASS) {
-    ESP_LOGE(TAG, "Failed to create TX task");
+  if (xTaskCreate(busTaskThunk, "bus_t4", 8192, this, 10, &busTask_) != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create bus task");
     this->mark_failed();
     return;
   }
@@ -167,17 +170,22 @@ void BusT4Component::dump_config() {
   }
 }
 
-void BusT4Component::rxTask() {
+void BusT4Component::busTask() {
   T4Packet packet;
   uint8_t expected_size = 0;
   // Protocol format: [BREAK] SYNC SIZE DATA[N] SIZE
   // The size byte is sent twice (start and end), no separate checksum byte.
   // Internal checksums are within the DATA portion.
   enum { WAIT_SYNC = 0, SIZE, DATA, TRAILING_SIZE } rx_state = WAIT_SYNC;
+  uint32_t last_rx_ms = 0;
+  TickType_t last_tx_time = 0;
 
   for (;;) {
     uint8_t byte;
-    if (parent_->available() && parent_->read_byte(&byte) == true) {
+    uint8_t drained = 0;
+    while (drained < RX_DRAIN_LIMIT && parent_->available() && parent_->read_byte(&byte) == true) {
+      drained++;
+      last_rx_ms = millis();
       switch (rx_state) {
         case WAIT_SYNC:
           // Wait for SYNC byte (0x55), ignore break bytes (0x00) and others
@@ -248,29 +256,51 @@ void BusT4Component::rxTask() {
           break;
       }
     }
-    vTaskDelay(2);
+
+    // Transmit between frames only, and only once the bus has gone quiet
+    if (rx_state == WAIT_SYNC && millis() - last_rx_ms >= BUS_IDLE_MS) {
+      T4Frame frame;
+      if (xQueueReceive(txQueue_, &frame, 0)) {
+        TickType_t elapsed = xTaskGetTickCount() - last_tx_time;
+        if (elapsed < TX_MIN_INTERVAL)
+          vTaskDelay(TX_MIN_INTERVAL - elapsed);
+
+        if (frame.raw)
+          ESP_LOGD(TAG, "Sending raw: %s", format_hex_pretty(frame.data, frame.size).c_str());
+        else
+          ESP_LOGD(TAG, "Sending packet: %s", format_hex_pretty(frame.data + 2, frame.size - 3).c_str());
+        send_break();
+        parent_->write_array(frame.data, frame.size);
+        parent_->flush();
+
+        last_tx_time = xTaskGetTickCount();
+      }
+    }
+
+    vTaskDelay(1);
   }
 
-  rxTask_ = nullptr;
+  busTask_ = nullptr;
   vTaskDelete(nullptr);
 }
 
-void BusT4Component::txTask() {
-  for (;;) {
-    T4Packet packet;
-    if (xQueueReceive(txQueue_, &packet, pdMS_TO_TICKS(10))) {
-      ESP_LOGD(TAG, "Sending packet: %s", format_hex_pretty(packet.data, packet.size).c_str());
-      send_break();
-      parent_->write_byte(T4_SYNC);
-      parent_->write_byte(packet.size);
-      parent_->write_array(packet.data, packet.size);
-      parent_->write_byte(packet.size);
-      parent_->flush();
-    }
-  }
+bool BusT4Component::queue_frame(const T4Frame &frame, TickType_t xTicksToWait) {
+  if (txQueue_ == nullptr)
+    return false;
+  return xQueueSend(txQueue_, &frame, xTicksToWait);
+}
 
-  txTask_ = nullptr;
-  vTaskDelete(nullptr);
+bool BusT4Component::write(T4Packet *packet, TickType_t xTicksToWait) {
+  if (packet == nullptr || packet->size == 0 || packet->size > sizeof(T4Packet::data))
+    return false;
+
+  T4Frame frame;
+  frame.data[0] = T4_SYNC;
+  frame.data[1] = packet->size;
+  std::copy_n(packet->data, packet->size, frame.data + 2);
+  frame.data[packet->size + 2] = packet->size;
+  frame.size = static_cast<uint8_t>(packet->size + 3);
+  return queue_frame(frame, xTicksToWait);
 }
 
 std::vector<uint8_t> BusT4Component::parse_hex_(const std::string &s) {
@@ -374,9 +404,16 @@ std::string BusT4Component::debug_request_raw(const std::string &frame_hex, uint
     return "";
   }
   ESP_LOGI(TAG, "[debug] TX raw: %s", format_hex_pretty(bytes).c_str());
-  send_break();
-  parent_->write_array(bytes.data(), bytes.size());
-  parent_->flush();
+  if (bytes.size() > sizeof(T4Frame::data)) {
+    ESP_LOGW(TAG, "[debug] raw frame of %u bytes rejected", static_cast<unsigned>(bytes.size()));
+    return "";
+  }
+  // Queued like everything else: nothing writes to the UART outside the bus task
+  T4Frame raw_frame;
+  raw_frame.raw = true;
+  raw_frame.size = static_cast<uint8_t>(bytes.size());
+  std::copy_n(bytes.data(), bytes.size(), raw_frame.data);
+  queue_frame(raw_frame, 0);
 
   // Self-contained reply capture: byte-exact frames can't go through request()
   // (which re-frames), so wait here for the first non-echo packet, then return it.
