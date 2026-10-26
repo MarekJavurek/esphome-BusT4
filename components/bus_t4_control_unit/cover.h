@@ -28,6 +28,9 @@ class BusT4ControlUnit;
 // Position threshold below which cover is considered fully closed
 static constexpr float CLOSED_POSITION_THRESHOLD = 0.007f;
 
+// Reported by controllers for a position they do not know
+static constexpr uint16_t POSITION_UNKNOWN = 0xFFFF;
+
 // Products starting with WLA = Walky (uses 1-byte position values)
 static const std::string PRODUCT_WALKY = "WLA";
 
@@ -69,6 +72,12 @@ class BusT4Cover : public cover::Cover, public BusT4Device, public Component {
   // Update position from encoder value
   void update_position(uint16_t encoder_pos);
 
+  // Decode a position payload, whose width varies by controller
+  bool read_position_value(const T4Packet &packet, uint16_t *out, bool walky_one_byte = true) const;
+
+  // Adopt the current encoder reading as the open position
+  void learn_open_position();
+
   // Publish state only if changed
   void publish_state_if_changed();
 
@@ -88,6 +97,9 @@ class BusT4Cover : public cover::Cover, public BusT4Device, public Component {
   uint16_t pos_max_{2048};    // Encoder position for fully open
   uint16_t pos_min_{0};       // Encoder position for fully closed
   uint16_t pos_current_{0};   // Current encoder position
+  uint16_t encoder_max_{0};      // Physical encoder limit (INF_MAX_OPN), not the open point
+  bool pos_max_from_cu_{false};  // pos_max_ came from INF_POS_MAX rather than a fallback
+  bool pos_max_learned_{false};  // pos_max_ was taken from the encoder at full open
 
   // Motor type
   T4MotorType motor_type_{MOTOR_SLIDING};
