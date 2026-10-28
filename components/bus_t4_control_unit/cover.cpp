@@ -256,6 +256,7 @@ void BusT4Cover::parse_dep_packet(const T4Packet &packet) {
 
       case STA_STOPPED:
       case OP_STOPPED:
+      case OP_STOPPED_ALT:
         ESP_LOGI(TAG, "Gate stopped (mid-movement)");
         timing_.cancel();  // Stopped mid-movement, can't learn
         last_operation_ = current_operation;
@@ -340,6 +341,7 @@ void BusT4Cover::parse_dep_packet(const T4Packet &packet) {
         this->position = cover::COVER_CLOSED;
         break;
       case STA_STOPPED:
+      case OP_STOPPED_ALT:
         current_operation = cover::COVER_OPERATION_IDLE;
         break;
     }
@@ -355,25 +357,33 @@ void BusT4Cover::parse_dmp_packet(const T4Packet &packet) {
   // DMP packets contain info responses
   // Structure: [device] [command] [flags] [sequence] [status] [data...]
 
-  if (packet.size < 14) return;
+  // A 13-byte reply carries no payload: that is how a rejection arrives, and
+  // dropping those left the log silent about parameters the controller refuses.
+  if (packet.size < 13) return;
 
   uint8_t device = packet.message.device;
   uint8_t command = packet.message.command;
   uint8_t flags = packet.message.dmp.flags;
   uint8_t sequence = packet.message.dmp.sequence;
   uint8_t status = packet.message.dmp.status;
+  const uint8_t payload_len = t4_dmp_payload_len(packet);
 
   ESP_LOGD(TAG, "DMP packet: dev=0x%02X, cmd=0x%02X, flags=0x%02X, seq=%d, status=0x%02X",
            device, command, flags, sequence, status);
 
-  // Log raw data for debugging
-  ESP_LOGV(TAG, "DMP raw data: %02X %02X %02X %02X %02X %02X %02X",
-           packet.data[8], packet.data[9], packet.data[10], packet.data[11],
-           packet.data[12], packet.data[13], packet.data[14]);
+  // Log the payload actually received, rather than a fixed window that read past it
+  if (payload_len > 0)
+    ESP_LOGV(TAG, "DMP payload (%d): %s", payload_len,
+             format_hex_pretty(packet.data + 12, payload_len).c_str());
 
   // Check for errors
   if (status != ERR_NONE) {
-    ESP_LOGW(TAG, "DMP error: 0x%02X", status);
+    // Loud while identifying the controller, quiet afterwards: a refused poll repeats forever
+    if (init_ok_) {
+      ESP_LOGD(TAG, "DMP error 0x%02X for cmd=0x%02X", status, command);
+    } else {
+      ESP_LOGW(TAG, "DMP error 0x%02X for cmd=0x%02X", status, command);
+    }
     return;
   }
 
@@ -393,6 +403,12 @@ void BusT4Cover::parse_dmp_packet(const T4Packet &packet) {
     T4Packet cont_packet(target_address_, parent_->get_address(), DMP, cont_msg, sizeof(cont_msg));
     write(&cont_packet, 0);
     // Still process the partial data we received
+  }
+
+  // Every handler below reads at least one payload byte
+  if (payload_len == 0) {
+    ESP_LOGV(TAG, "Empty DMP payload for cmd=0x%02X", command);
+    return;
   }
 
   // Process based on command type
@@ -438,6 +454,7 @@ void BusT4Cover::parse_dmp_packet(const T4Packet &packet) {
           current_operation = cover::COVER_OPERATION_CLOSING;
           break;
         case STA_STOPPED:
+        case OP_STOPPED_ALT:
         case STA_UNKNOWN:
         case STA_PART_OPENED:
           current_operation = cover::COVER_OPERATION_IDLE;

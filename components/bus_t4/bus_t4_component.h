@@ -69,7 +69,7 @@ class BusT4Component final : public Component, public uart::UARTDevice {
   T4Source get_address() const { return address_; }
 
   // Register a device to receive packet callbacks
-  void register_device(BusT4Device *device) { devices_.push_back(device); }
+  void register_device(BusT4Device *device);
 
   void set_bus_errors_sensor(sensor::Sensor *s) { bus_errors_sensor_ = s; }
   void set_bus_timeouts_sensor(sensor::Sensor *s) { bus_timeouts_sensor_ = s; }
@@ -89,6 +89,10 @@ class BusT4Component final : public Component, public uart::UARTDevice {
 
  private:
   void discover_();
+
+  // Broadcast "who is on the bus"; the reply is handled wherever it lands
+  bool send_who_();
+  void handle_who_(const T4Packet &pkt);
 
   // Receive and transmit share one task, so a send can never land in the middle of
   // a frame another device is still transmitting.
@@ -118,6 +122,8 @@ class BusT4Component final : public Component, public uart::UARTDevice {
   std::vector<BusT4Device *> devices_;
 
   bool discovered_{false};
+  uint32_t last_discovery_ms_{0};   // when the last WHO went out
+  uint8_t discovery_rounds_{0};     // retries so far, for the backoff
   T4Source controller_address_{0x00, 0x03};
   T4Source oxi_address_{0x00, 0x00};
   bool has_oxi_{false};

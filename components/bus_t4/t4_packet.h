@@ -139,6 +139,7 @@ enum T4OperationStatus : uint8_t {
   OP_PARTIAL_2 = 0x06,   // Partial open 2
   OP_PARTIAL_3 = 0x07,   // Partial open 3
   OP_STOPPED = 0x08,     // Movement stopped
+  OP_STOPPED_ALT = 0x88, // Movement stopped, acknowledged form used by some controllers
 };
 
 struct T4Packet {

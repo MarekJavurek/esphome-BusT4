@@ -35,6 +35,10 @@ static constexpr uint8_t RX_DRAIN_LIMIT = 64;
 // Minimum gap between two of our own transmissions
 static constexpr TickType_t TX_MIN_INTERVAL = pdMS_TO_TICKS(100);
 
+// Backoff for repeating discovery: a control unit that is busy at boot, or that is
+// powered up later, is still found without flooding the bus in the meantime.
+static constexpr uint32_t DISCOVERY_RETRY_MS[4] = {5000, 10000, 20000, 30000};
+
 void BusT4Component::setup() {
   rxQueue_ = xQueueCreate(32, sizeof(T4Packet));
   if (rxQueue_ == nullptr) {
@@ -70,6 +74,20 @@ void BusT4Component::loop() {
   while (xQueueReceive(rxQueue_, &packet, 0))
     this->dispatch_packet_(packet);
 
+  // Discovery used to be a single burst in setup(): a control unit that did not
+  // answer in those three seconds left every device on the bus dead until the next
+  // reboot. Keep asking instead; the reply arrives through dispatch_packet_.
+  if (!discovered_) {
+    const uint32_t interval = DISCOVERY_RETRY_MS[discovery_rounds_ < 3 ? discovery_rounds_ : 3];
+    if (millis() - last_discovery_ms_ >= interval) {
+      last_discovery_ms_ = millis();
+      if (discovery_rounds_ < 3)
+        discovery_rounds_++;
+      ESP_LOGD(TAG, "Control unit still unknown, asking again");
+      this->send_who_();
+    }
+  }
+
   if (bus_errors_sensor_ != nullptr && rx_errors_ != last_bus_errors_) {
     last_bus_errors_ = rx_errors_;
     bus_errors_sensor_->publish_state(rx_errors_);
@@ -85,6 +103,10 @@ void BusT4Component::dispatch_packet_(const T4Packet &packet) {
     ESP_LOGV(TAG, "Ignoring TX echo");
     return;
   }
+  // A WHO reply can land here at any time, not just during the boot burst
+  if (packet.header.protocol == DMP && packet.message.command == INF_WHO)
+    this->handle_who_(packet);
+
   // Route by the message's target role: FOR_ALL fans out to everyone, otherwise
   // only devices that registered for that role (FOR_CU entities vs the OXI).
   auto role = static_cast<T4Target>(packet.message.device);
@@ -110,54 +132,100 @@ std::string BusT4Component::fetch_string(T4Source to, uint8_t info_cmd) {
   size_t nul = s.find('\0');
   if (nul != std::string::npos)
     s.resize(nul);
-  return s;
+
+  // These strings go straight into the API, where a byte that is not valid UTF-8
+  // breaks the protobuf stream: the client drops the connection, reconnects, reads
+  // the same reply and loops. Controllers answer in ASCII, so anything outside
+  // printable ASCII is padding (the RBA4R10 pads with 0xFF) and is dropped.
+  std::string clean;
+  clean.reserve(s.size());
+  for (char ch : s) {
+    const auto byte = static_cast<uint8_t>(ch);
+    if (byte >= 0x20 && byte < 0x7F)
+      clean.push_back(ch);
+  }
+  if (clean.size() != s.size())
+    ESP_LOGD(TAG, "Dropped %u non-printable byte(s) from the reply to 0x%02X",
+             static_cast<unsigned>(s.size() - clean.size()), info_cmd);
+  return clean;
+}
+
+void BusT4Component::register_device(BusT4Device *device) {
+  devices_.push_back(device);
+  // Devices set up after this component, so one registering late still needs
+  // whatever discovery has already resolved.
+  if (discovered_)
+    device->on_controller_resolved(controller_address_);
+}
+
+bool BusT4Component::send_who_() {
+  T4Source broadcast{0xFF, 0xFF};
+  uint8_t who[5] = {FOR_ALL, INF_WHO, REQ_GET, 0x00, 0x00};
+  T4Packet req(broadcast, address_, DMP, who, sizeof(who));
+  return this->write(&req, pdMS_TO_TICKS(200));
+}
+
+void BusT4Component::handle_who_(const T4Packet &pkt) {
+  // The receive buffer is reused, so bytes past `size` are leftovers from an earlier
+  // frame: never read the device type out of a short or rejected reply.
+  const uint8_t payload = t4_dmp_payload_len(pkt);
+  if (pkt.message.dmp.status != ERR_NONE || payload < 1) {
+    ESP_LOGD(TAG, "Ignoring WHO reply from 0x%02X.%02X: status 0x%02X, %u payload byte(s)",
+             pkt.header.from.address, pkt.header.from.endpoint, pkt.message.dmp.status,
+             static_cast<unsigned>(payload));
+    return;
+  }
+
+  const uint8_t type = pkt.message.dmp.data[0];  // device type byte
+  if (type == CONTROLLER) {
+    if (discovered_) {
+      if (controller_address_ != pkt.header.from)
+        ESP_LOGW(TAG, "Ignoring second control unit at 0x%02X.%02X, already using 0x%02X.%02X",
+                 pkt.header.from.address, pkt.header.from.endpoint,
+                 controller_address_.address, controller_address_.endpoint);
+      return;
+    }
+    controller_address_ = pkt.header.from;
+    discovered_ = true;
+    ESP_LOGI(TAG, "Controller at 0x%02X.%02X%s", controller_address_.address,
+             controller_address_.endpoint, has_oxi_ ? " (OXI present)" : "");
+    this->set_controller_address(controller_address_);
+  } else if (type == RADIO && !has_oxi_) {
+    oxi_address_ = pkt.header.from;
+    has_oxi_ = true;
+    ESP_LOGI(TAG, "OXI at 0x%02X.%02X", oxi_address_.address, oxi_address_.endpoint);
+  }
 }
 
 void BusT4Component::discover_() {
-  T4Source broadcast{0xFF, 0xFF};
-  uint8_t who[5] = {FOR_ALL, INF_WHO, REQ_GET, 0x00, 0x00};
-
-  bool found = false;
+  // Short blocking burst at boot: devices set up right after this, so having the
+  // address already resolved saves each of them a failed first read.
   TickType_t give_up = xTaskGetTickCount() + pdMS_TO_TICKS(3000);
-  while (!found && xTaskGetTickCount() < give_up) {
-    T4Packet req(broadcast, address_, DMP, who, sizeof(who));
-    if (!this->write(&req, pdMS_TO_TICKS(200))) {
+  while (!discovered_ && xTaskGetTickCount() < give_up) {
+    if (!this->send_who_()) {
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
     TickType_t window = xTaskGetTickCount() + pdMS_TO_TICKS(400);
-    while (xTaskGetTickCount() < window) {
+    while (!discovered_ && xTaskGetTickCount() < window) {
       T4Packet pkt;
       if (!this->read(&pkt, pdMS_TO_TICKS(20)))
         continue;
       if (pkt.header.from == address_)
         continue;
-      if (pkt.header.protocol != DMP || pkt.message.command != INF_WHO) {
+      if (pkt.header.protocol == DMP && pkt.message.command == INF_WHO)
+        this->handle_who_(pkt);
+      else
         this->dispatch_packet_(pkt);
-        continue;
-      }
-      uint8_t type = pkt.message.dmp.data[0];  // device type byte
-      if (type == CONTROLLER) {
-        controller_address_ = pkt.header.from;
-        found = true;
-      } else if (type == RADIO) {
-        oxi_address_ = pkt.header.from;
-        has_oxi_ = true;
-      }
     }
   }
 
-  if (found) {
-    ESP_LOGI(TAG, "Controller at 0x%02X.%02X%s", controller_address_.address, controller_address_.endpoint,
-             has_oxi_ ? " (OXI present)" : "");
-  } else {
-    ESP_LOGW(TAG, "Controller not found; using default 0x%02X.%02X", controller_address_.address,
-             controller_address_.endpoint);
+  if (!discovered_) {
+    ESP_LOGW(TAG, "No control unit answered in 3s; using default 0x%02X.%02X and retrying in the background",
+             controller_address_.address, controller_address_.endpoint);
+    this->set_controller_address(controller_address_);
   }
-  this->set_controller_address(controller_address_);
-
-  if (found)
-    discovered_ = true;
+  last_discovery_ms_ = millis();
 }
 
 void BusT4Component::dump_config() {
