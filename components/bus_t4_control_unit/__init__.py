@@ -75,7 +75,9 @@ DOMAINS = ("switch", "number", "select", "sensor", "button")
 #   sensor: width (default 1)
 #   button: value (written on press)
 # `byte` is the raw Nice Bus-T4 parameter address.
-# Ranges/units verified live on RBS400. A user can define params not listed here
+# Ranges/units verified live on RBS400, then widened where an RBA4R10 reported a
+# value outside them (decel_speed_* max, surge_time min).
+# A user can define params not listed here
 # inline in `expose:` with `byte` + `domain` (see _custom_row / README).
 PARAMS = {
     # Switches (on/off flags)
@@ -96,8 +98,8 @@ PARAMS = {
     "speed_closing": {"byte": 0x43, "domain": "number", "name": "Speed (closing)", "icon": "mdi:speedometer-medium", "min": 25, "max": 100, "unit": "%"},
     "force_opening": {"byte": 0x4A, "domain": "number", "name": "Force (opening)", "icon": "mdi:arm-flex", "min": 0, "max": 100, "unit": "%"},
     "force_closing": {"byte": 0x4B, "domain": "number", "name": "Force (closing)", "icon": "mdi:arm-flex-outline", "min": 0, "max": 100, "unit": "%"},
-    "decel_speed_opening": {"byte": 0x45, "domain": "number", "name": "Deceleration speed (opening)", "icon": "mdi:speedometer-slow", "min": 25, "max": 50, "unit": "%"},
-    "decel_speed_closing": {"byte": 0x46, "domain": "number", "name": "Deceleration speed (closing)", "icon": "mdi:speedometer-slow", "min": 25, "max": 50, "unit": "%"},
+    "decel_speed_opening": {"byte": 0x45, "domain": "number", "name": "Deceleration speed (opening)", "icon": "mdi:speedometer-slow", "min": 25, "max": 100, "unit": "%"},
+    "decel_speed_closing": {"byte": 0x46, "domain": "number", "name": "Deceleration speed (closing)", "icon": "mdi:speedometer-slow", "min": 25, "max": 100, "unit": "%"},
     "decel_force_opening": {"byte": 0x4D, "domain": "number", "name": "Deceleration force (opening)", "icon": "mdi:arm-flex", "min": 0, "max": 100, "unit": "%"},
     "decel_force_closing": {"byte": 0x4E, "domain": "number", "name": "Deceleration force (closing)", "icon": "mdi:arm-flex-outline", "min": 0, "max": 100, "unit": "%"},
     "decel_sensitivity_opening": {"byte": 0x3D, "domain": "number", "name": "Deceleration sensitivity (opening)", "icon": "mdi:car-brake-alert", "min": 0, "max": 100, "unit": "%"},
@@ -106,7 +108,7 @@ PARAMS = {
     "photo_close_time": {"byte": 0x85, "domain": "number", "name": "Close after photo time", "icon": "mdi:timer-outline", "min": 0, "max": 250, "unit": "s"},
     "always_close_time": {"byte": 0x89, "domain": "number", "name": "Always-close time", "icon": "mdi:timer-outline", "min": 0, "max": 20, "unit": "s"},
     "standby_time": {"byte": 0x8D, "domain": "number", "name": "Stand-by time", "icon": "mdi:timer-outline", "min": 5, "max": 250, "unit": "s"},
-    "surge_time": {"byte": 0x91, "domain": "number", "name": "Surge time", "icon": "mdi:timer-outline", "min": 1, "max": 10, "step": 0.1, "unit": "s", "scale": 0.1},
+    "surge_time": {"byte": 0x91, "domain": "number", "name": "Surge time", "icon": "mdi:timer-outline", "min": 0, "max": 10, "step": 0.1, "unit": "s", "scale": 0.1},
     "pre_flash_open_time": {"byte": 0x95, "domain": "number", "name": "Pre-flash time (opening)", "icon": "mdi:timer-outline", "min": 1, "max": 10, "unit": "s"},
     "pre_flash_close_time": {"byte": 0x99, "domain": "number", "name": "Pre-flash time (closing)", "icon": "mdi:timer-outline", "min": 1, "max": 10, "unit": "s"},
     "max_work_time": {"byte": 0xA7, "domain": "number", "name": "Maximum work time", "icon": "mdi:timer-alert-outline", "min": 10, "max": 250, "unit": "s"},
