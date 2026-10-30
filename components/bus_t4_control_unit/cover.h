@@ -53,6 +53,7 @@ class BusT4Cover : public cover::Cover, public BusT4Device, public Component {
   void set_auto_learn_timing(bool enable) { timing_.set_auto_learn(enable); }
   void set_position_report_interval(uint32_t interval) { position_report_interval_ = interval; }
   void set_force_estimated_position(bool force) { force_estimated_position_ = force; }
+  void set_position_control(bool enable) { position_control_ = enable; }
   void set_control_unit(BusT4ControlUnit *cu) { cu_ = cu; }
 
  protected:
@@ -110,6 +111,9 @@ class BusT4Cover : public cover::Cover, public BusT4Device, public Component {
   // Time-based position estimation + auto-learning (gates without encoder feedback)
   TimeBasedPositionEstimator timing_;
   bool force_estimated_position_{false};  // Ignore the encoder and always use the estimate (testing)
+  // Offer a position slider at all. Off for units with no encoder, where a partial
+  // target can only be reached by opening and stopping on a stopwatch.
+  bool position_control_{true};
 
   // Timing
   uint32_t last_position_update_{0};

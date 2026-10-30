@@ -13,7 +13,7 @@ static const char *TAG = "bus_t4.cover";
 cover::CoverTraits BusT4Cover::get_traits() {
   auto traits = cover::CoverTraits();
   traits.set_is_assumed_state(false);  // We track actual state now
-  traits.set_supports_position(true);
+  traits.set_supports_position(position_control_);
   traits.set_supports_tilt(false);
   traits.set_supports_toggle(false);
   traits.set_supports_stop(true);
@@ -127,6 +127,8 @@ void BusT4Cover::dump_config() {
     if (is_walky_) {
       ESP_LOGCONFIG(TAG, "  Mode: Walky (1-byte position)");
     }
+
+    ESP_LOGCONFIG(TAG, "  Position control: %s", position_control_ ? "Yes" : "No (open/stop/close only)");
 
     // Position tracking mode
     if (force_estimated_position_) {
