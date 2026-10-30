@@ -160,6 +160,7 @@ CONF_CLOSE_DURATION = "close_duration"
 CONF_AUTO_LEARN_TIMING = "auto_learn_timing"
 CONF_POSITION_REPORT_INTERVAL = "position_report_interval"
 CONF_FORCE_ESTIMATED_POSITION = "force_estimated_position"
+CONF_POSITION_CONTROL = "position_control"
 
 # Resolved-definition keys carried alongside the entity config for to_code; not
 # part of any entity schema, so stripped before validating the entity.
@@ -176,6 +177,7 @@ COVER_SCHEMA = (
             cv.Optional(CONF_AUTO_LEARN_TIMING, default=True): cv.boolean,
             cv.Optional(CONF_POSITION_REPORT_INTERVAL, default="1s"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_FORCE_ESTIMATED_POSITION, default=False): cv.boolean,
+            cv.Optional(CONF_POSITION_CONTROL, default=True): cv.boolean,
         }
     )
 )
@@ -372,6 +374,7 @@ async def to_code(config):
         cg.add(cov.set_auto_learn_timing(cc[CONF_AUTO_LEARN_TIMING]))
         cg.add(cov.set_position_report_interval(cc[CONF_POSITION_REPORT_INTERVAL]))
         cg.add(cov.set_force_estimated_position(cc[CONF_FORCE_ESTIMATED_POSITION]))
+        cg.add(cov.set_position_control(cc[CONF_POSITION_CONTROL]))
 
     expose = config[CONF_EXPOSE]
 
